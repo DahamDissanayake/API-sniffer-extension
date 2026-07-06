@@ -1005,7 +1005,13 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
   window.fetch = async function patchedFetch(input, init) {
     const startTime = Date.now();
     const method = (init && init.method) || (typeof input !== "string" && input && input.method) || "GET";
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    // Resolve against the page's own location: a plain string `input` is very often
+    // relative (fetch('/api/foo')), and capturing it as-is would let background.js
+    // resolve it against the extension's own origin instead of the page's — silently
+    // misattributing the endpoint to the wrong domain. Request/URL objects already
+    // carry an absolute URL, so this is a no-op for them.
+    const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const url = new URL(rawUrl, location.href).href;
 
     const requestHeaders = {};
     if (init && init.headers) {
@@ -1063,7 +1069,10 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
   const originalSetRequestHeader = XHRProto.setRequestHeader;
 
   XHRProto.open = function patchedOpen(method, url, ...rest) {
-    this.__apiSniffer = { method: method.toUpperCase(), url, requestHeaders: {}, startTime: Date.now() };
+    // Same relative-URL concern as the fetch hook above: xhr.open('GET', '/api/foo')
+    // is common and must resolve against the page's own location, not the extension's.
+    const absoluteUrl = new URL(url, location.href).href;
+    this.__apiSniffer = { method: method.toUpperCase(), url: absoluteUrl, requestHeaders: {}, startTime: Date.now() };
     return originalOpen.call(this, method, url, ...rest);
   };
 
@@ -1284,30 +1293,39 @@ chrome.webRequest.onCompleted.addListener(
     pendingRequestData.delete(details.requestId);
     if (!pending) return;
 
-    cleanupRecentHookCaptures();
-    if (dedup.shouldSkipWebRequestFallback(recentHookCaptures, pending.method, pending.url, Date.now())) {
-      return;
-    }
-
     const responseHeaders = {};
     (details.responseHeaders || []).forEach((h) => {
       responseHeaders[h.name] = h.value;
     });
 
-    // Note: chrome.webRequest cannot access response bodies at all (a hard Chrome
-    // platform limitation, not something extra permissions unlock), so this fallback
-    // path only ever fills in requests the MAIN-world hook missed entirely, with
-    // responseBody left undefined. See README.md "Chrome API limitations".
-    ingestCapture({
-      method: pending.method,
-      url: pending.url,
-      requestHeaders: pending.headers,
-      requestBody: pending.body,
-      responseHeaders,
-      responseBody: undefined,
-      status: details.statusCode,
-      timestamp: Date.now(),
-    }).catch((e) => console.error("api-sniffer webRequest capture error", e));
+    // webRequest.onCompleted fires as soon as the network layer finishes, which is
+    // typically BEFORE the MAIN-world hook's capture message arrives here — that
+    // message has to cross an extra postMessage + chrome.runtime.sendMessage hop.
+    // Checking the dedup window immediately would almost always miss a hook capture
+    // that's still in flight, double-counting nearly every request. Delay briefly
+    // and re-check right before ingesting instead, giving the hook message time to
+    // register in recentHookCaptures first.
+    setTimeout(() => {
+      cleanupRecentHookCaptures();
+      if (dedup.shouldSkipWebRequestFallback(recentHookCaptures, pending.method, pending.url, Date.now())) {
+        return;
+      }
+
+      // Note: chrome.webRequest cannot access response bodies at all (a hard Chrome
+      // platform limitation, not something extra permissions unlock), so this fallback
+      // path only ever fills in requests the MAIN-world hook missed entirely, with
+      // responseBody left undefined. See README.md "Chrome API limitations".
+      ingestCapture({
+        method: pending.method,
+        url: pending.url,
+        requestHeaders: pending.headers,
+        requestBody: pending.body,
+        responseHeaders,
+        responseBody: undefined,
+        status: details.statusCode,
+        timestamp: Date.now(),
+      }).catch((e) => console.error("api-sniffer webRequest capture error", e));
+    }, 500);
   },
   { urls: ["<all_urls>"] },
   ["responseHeaders"]
