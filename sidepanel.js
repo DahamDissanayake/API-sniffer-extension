@@ -45,6 +45,10 @@ function renderEndpointList() {
   }
 }
 
+function cssSafe(key) {
+  return key.replace(/[^a-zA-Z0-9]/g, "_");
+}
+
 function renderCard(key, entry) {
   const card = document.createElement("div");
   card.className = "endpoint-card";
@@ -83,6 +87,34 @@ function renderCard(key, entry) {
     renderSection("Response Body", (latestSample.responseBody || "(empty)") + responseNote)
   );
 
+  const actions = document.createElement("div");
+  actions.className = "endpoint-actions";
+
+  const replayButton = document.createElement("button");
+  replayButton.textContent = "Replay";
+  replayButton.addEventListener("click", () => openReplayForm(key, entry));
+
+  const curlButton = document.createElement("button");
+  curlButton.textContent = "Copy as curl";
+  curlButton.addEventListener("click", () => {
+    const cmd = curlBuilder.buildCurlCommand({
+      method: entry.method,
+      url: latestSample.url.startsWith("http") ? latestSample.url : entry.origin + latestSample.url,
+      headers: latestSample.requestHeaders,
+      body: latestSample.requestBody,
+    });
+    navigator.clipboard.writeText(cmd);
+  });
+
+  actions.appendChild(replayButton);
+  actions.appendChild(curlButton);
+  details.appendChild(actions);
+
+  const replayContainer = document.createElement("div");
+  replayContainer.className = "replay-container";
+  replayContainer.id = `replay-${cssSafe(key)}`;
+  details.appendChild(replayContainer);
+
   card.appendChild(summary);
   card.appendChild(details);
   return card;
@@ -98,6 +130,109 @@ function renderSection(label, content) {
   section.appendChild(heading);
   section.appendChild(pre);
   return section;
+}
+
+function openReplayForm(key, entry) {
+  const container = qs(`replay-${cssSafe(key)}`);
+  container.innerHTML = "";
+  const latestSample = entry.samples[0];
+
+  const urlInput = document.createElement("input");
+  urlInput.className = "replay-url";
+  urlInput.value = latestSample.url.startsWith("http") ? latestSample.url : entry.origin + latestSample.url;
+
+  const headersInput = document.createElement("textarea");
+  headersInput.className = "replay-headers";
+  headersInput.value = JSON.stringify(latestSample.requestHeaders || {}, null, 2);
+
+  const bodyInput = document.createElement("textarea");
+  bodyInput.className = "replay-body";
+  bodyInput.value = latestSample.requestBody || "";
+
+  const sendButton = document.createElement("button");
+  sendButton.textContent = "Send";
+
+  const responseBox = document.createElement("pre");
+  responseBox.className = "replay-response";
+
+  sendButton.addEventListener("click", async () => {
+    let headers;
+    try {
+      headers = JSON.parse(headersInput.value || "{}");
+    } catch (e) {
+      responseBox.textContent = "Invalid headers JSON";
+      return;
+    }
+    const request = { method: entry.method, url: urlInput.value, headers, body: bodyInput.value || undefined };
+    responseBox.textContent = "Sending...";
+
+    const result = await chrome.runtime.sendMessage({ type: "replay", origin: entry.origin, request });
+
+    if (!result.ok && result.reason === "no-tab") {
+      responseBox.textContent =
+        "No open tab for this origin. Open the site to replay with its session, or click Send again to replay cookie-less.";
+      sendButton.dataset.forceCookieless = "true";
+      return;
+    }
+
+    if (sendButton.dataset.forceCookieless === "true" && !result.ok) {
+      const fallback = await chrome.runtime.sendMessage({ type: "replayCookieless", request });
+      renderReplayResult(responseBox, fallback);
+      return;
+    }
+
+    renderReplayResult(responseBox, result);
+  });
+
+  container.appendChild(urlInput);
+  container.appendChild(headersInput);
+  container.appendChild(bodyInput);
+  container.appendChild(sendButton);
+  container.appendChild(responseBox);
+}
+
+function renderReplayResult(responseBox, result) {
+  if (!result.ok) {
+    responseBox.textContent = `Error: ${result.reason}${result.message ? " - " + result.message : ""}`;
+    return;
+  }
+  const cookieNote = result.cookieless ? "[replayed without cookies]\n" : "";
+  responseBox.textContent = `${cookieNote}Status: ${result.status}\nHeaders: ${JSON.stringify(
+    result.headers,
+    null,
+    2
+  )}\n\nBody:\n${result.body}`;
+}
+
+async function loadSettings() {
+  const response = await chrome.runtime.sendMessage({ type: "getSettings" });
+  qs("retention-days").value = response.settings.retentionDays;
+  qs("throttle-ms").value = response.settings.throttleWindowMs;
+}
+
+function setupSettingsActions() {
+  qs("save-settings").addEventListener("click", async () => {
+    await chrome.runtime.sendMessage({
+      type: "setSettings",
+      settings: {
+        retentionDays: Number(qs("retention-days").value) || 30,
+        throttleWindowMs: Number(qs("throttle-ms").value) || 30000,
+      },
+    });
+  });
+
+  qs("clear-domain").addEventListener("click", async () => {
+    if (!state.origin) return;
+    if (!confirm(`Clear all captured data for ${state.origin}?`)) return;
+    await chrome.runtime.sendMessage({ type: "clearDomain", origin: state.origin });
+    await loadEndpoints();
+  });
+
+  qs("clear-all").addEventListener("click", async () => {
+    if (!confirm("Clear ALL captured data for every domain?")) return;
+    await chrome.runtime.sendMessage({ type: "clearAll" });
+    await loadEndpoints();
+  });
 }
 
 function setupSearch() {
@@ -119,12 +254,14 @@ function setupTabs() {
     qs("tab-endpoints").classList.remove("active");
     qs("view-settings").hidden = false;
     qs("view-endpoints").hidden = true;
+    loadSettings();
   });
 }
 
 async function init() {
   setupTabs();
   setupSearch();
+  setupSettingsActions();
   state.origin = await getActiveTabOrigin();
   await loadEndpoints();
 
