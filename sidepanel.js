@@ -166,18 +166,21 @@ function openReplayForm(key, entry) {
     const request = { method: entry.method, url: urlInput.value, headers, body: bodyInput.value || undefined };
     responseBox.textContent = "Sending...";
 
+    // If a prior click already found no open tab, skip straight to the cookie-less
+    // fallback instead of re-trying "replay" (which would just fail with "no-tab"
+    // again as long as the tab stays closed, and re-trigger the warning forever).
+    if (sendButton.dataset.forceCookieless === "true") {
+      const fallback = await chrome.runtime.sendMessage({ type: "replayCookieless", request });
+      renderReplayResult(responseBox, fallback);
+      return;
+    }
+
     const result = await chrome.runtime.sendMessage({ type: "replay", origin: entry.origin, request });
 
     if (!result.ok && result.reason === "no-tab") {
       responseBox.textContent =
         "No open tab for this origin. Open the site to replay with its session, or click Send again to replay cookie-less.";
       sendButton.dataset.forceCookieless = "true";
-      return;
-    }
-
-    if (sendButton.dataset.forceCookieless === "true" && !result.ok) {
-      const fallback = await chrome.runtime.sendMessage({ type: "replayCookieless", request });
-      renderReplayResult(responseBox, fallback);
       return;
     }
 
