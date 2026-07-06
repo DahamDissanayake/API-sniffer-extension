@@ -1284,7 +1284,21 @@ chrome.webRequest.onSendHeaders.addListener(
     pending.headers = headers;
   },
   { urls: ["<all_urls>"] },
-  ["requestHeaders"]
+  // "extraHeaders" is required to see security-sensitive request headers (notably
+  // Authorization) in this callback at all — without it Chrome silently omits them,
+  // which would under-detect authWarning for requests the hook missed and this
+  // fallback path had to capture on its own.
+  ["requestHeaders", "extraHeaders"]
+);
+
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    // Aborted/failed requests never reach onCompleted, so without this listener
+    // their pendingRequestData entry (set in onBeforeRequest) would never be
+    // cleaned up and would accumulate for the life of the service worker instance.
+    pendingRequestData.delete(details.requestId);
+  },
+  { urls: ["<all_urls>"] }
 );
 
 chrome.webRequest.onCompleted.addListener(
@@ -1328,7 +1342,9 @@ chrome.webRequest.onCompleted.addListener(
     }, 500);
   },
   { urls: ["<all_urls>"] },
-  ["responseHeaders"]
+  // "extraHeaders" is required to see Set-Cookie and a few other security-sensitive
+  // response headers in this callback — same rationale as onSendHeaders above.
+  ["responseHeaders", "extraHeaders"]
 );
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
