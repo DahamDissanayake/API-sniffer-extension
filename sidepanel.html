@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header>
+    <nav>
+      <button id="tab-endpoints" class="tab-button active">Endpoints</button>
+      <button id="tab-settings" class="tab-button">Settings</button>
+    </nav>
+  </header>
+
+  <section id="view-endpoints">
+    <input id="search-input" type="text" placeholder="Filter by path..." />
+    <div id="endpoint-list"></div>
+  </section>
+
+  <section id="view-settings" hidden>
+    <label>Retention (days): <input id="retention-days" type="number" min="1" /></label>
+    <label>Poll throttle (ms): <input id="throttle-ms" type="number" min="0" /></label>
+    <button id="save-settings">Save</button>
+    <hr />
+    <button id="clear-domain">Clear this domain</button>
+    <button id="clear-all">Clear all data</button>
+  </section>
+
+  <script src="utils/curl.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
