@@ -4,7 +4,7 @@
   window.fetch = async function patchedFetch(input, init) {
     const startTime = Date.now();
     const method = (init && init.method) || (typeof input !== "string" && input && input.method) || "GET";
-    const url = typeof input === "string" ? input : input.url;
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 
     const requestHeaders = {};
     if (init && init.headers) {
@@ -16,34 +16,40 @@
 
     const response = await originalFetch.call(this, input, init);
 
+    // Read headers synchronously and the body asynchronously, without awaiting the
+    // body before returning `response` to the page. Native fetch() resolves as soon
+    // as headers arrive, independent of body consumption — awaiting cloned.text()
+    // here would hang the page's own fetch() promise forever on a long-lived/streamed
+    // response (SSE-over-fetch, chunked NDJSON, etc), which breaks "passive" capture.
     const cloned = response.clone();
-    let responseBody;
-    try {
-      responseBody = await cloned.text();
-    } catch (e) {
-      responseBody = undefined;
-    }
     const responseHeaders = {};
     cloned.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    window.postMessage(
-      {
-        source: "api-sniffer-hook",
-        payload: {
-          method: method.toUpperCase(),
-          url,
-          requestHeaders,
-          requestBody,
-          responseHeaders,
-          responseBody,
-          status: response.status,
-          timestamp: startTime,
-        },
-      },
-      "*"
-    );
+    cloned
+      .text()
+      .then((responseBody) => {
+        window.postMessage(
+          {
+            source: "api-sniffer-hook",
+            payload: {
+              method: method.toUpperCase(),
+              url,
+              requestHeaders,
+              requestBody,
+              responseHeaders,
+              responseBody,
+              status: response.status,
+              timestamp: startTime,
+            },
+          },
+          "*"
+        );
+      })
+      .catch(() => {
+        // Body unreadable or never completes (e.g. an infinite stream) — nothing to capture.
+      });
 
     return response;
   };
@@ -72,6 +78,17 @@
       this.__apiSniffer.requestBody = typeof body === "string" ? body : undefined;
       this.addEventListener("loadend", () => {
         const responseHeaders = headerUtils.parseRawHeaderString(this.getAllResponseHeaders());
+        // Reading .responseText throws InvalidStateError when responseType is anything
+        // other than "" or "text" (a common case: responseType = "json"). Branch on
+        // responseType instead of relying on a typeof check after the throw already happened.
+        let responseBody;
+        if (this.responseType === "" || this.responseType === "text") {
+          responseBody = typeof this.responseText === "string" ? this.responseText : undefined;
+        } else if (this.responseType === "json") {
+          responseBody = this.response !== null && this.response !== undefined ? JSON.stringify(this.response) : undefined;
+        } else {
+          responseBody = undefined; // arraybuffer/blob/document: not safely capturable as text
+        }
         window.postMessage(
           {
             source: "api-sniffer-hook",
@@ -81,7 +98,7 @@
               requestHeaders: this.__apiSniffer.requestHeaders,
               requestBody: this.__apiSniffer.requestBody,
               responseHeaders,
-              responseBody: typeof this.responseText === "string" ? this.responseText : undefined,
+              responseBody,
               status: this.status,
               timestamp: this.__apiSniffer.startTime,
             },
