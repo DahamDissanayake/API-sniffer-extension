@@ -135,7 +135,7 @@ async function pruneAllOrigins() {
   await chrome.storage.local.set(updates);
 }
 
-const api = {
+const storageApi = {
   truncateBody,
   stripCookies,
   mergeCapture,
@@ -149,5 +149,5 @@ const api = {
   pruneAllOrigins,
 };
 
-if (typeof module !== "undefined" && module.exports) module.exports = api;
-if (typeof globalThis !== "undefined") globalThis.storage = api;
+if (typeof module !== "undefined" && module.exports) module.exports = storageApi;
+if (typeof globalThis !== "undefined") globalThis.storage = storageApi;

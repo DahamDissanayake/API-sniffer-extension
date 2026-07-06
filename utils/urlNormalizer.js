@@ -19,6 +19,6 @@ function buildEndpointKey(method, normalizedPath) {
   return `${method.toUpperCase()} ${normalizedPath}`;
 }
 
-const api = { normalizePath, buildEndpointKey };
-if (typeof module !== "undefined" && module.exports) module.exports = api;
-if (typeof globalThis !== "undefined") globalThis.urlNormalizer = api;
+const urlNormalizerApi = { normalizePath, buildEndpointKey };
+if (typeof module !== "undefined" && module.exports) module.exports = urlNormalizerApi;
+if (typeof globalThis !== "undefined") globalThis.urlNormalizer = urlNormalizerApi;

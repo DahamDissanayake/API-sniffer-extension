@@ -15,6 +15,6 @@ function parseRawHeaderString(raw) {
   return result;
 }
 
-const api = { parseRawHeaderString };
-if (typeof module !== "undefined" && module.exports) module.exports = api;
-if (typeof globalThis !== "undefined") globalThis.headerUtils = api;
+const headersApi = { parseRawHeaderString };
+if (typeof module !== "undefined" && module.exports) module.exports = headersApi;
+if (typeof globalThis !== "undefined") globalThis.headerUtils = headersApi;

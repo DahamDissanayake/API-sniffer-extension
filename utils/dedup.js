@@ -5,6 +5,6 @@ function shouldSkipWebRequestFallback(recentHookCaptures, method, url, now, wind
   return now - seenAt <= windowMs;
 }
 
-const api = { shouldSkipWebRequestFallback };
-if (typeof module !== "undefined" && module.exports) module.exports = api;
-if (typeof globalThis !== "undefined") globalThis.dedup = api;
+const dedupApi = { shouldSkipWebRequestFallback };
+if (typeof module !== "undefined" && module.exports) module.exports = dedupApi;
+if (typeof globalThis !== "undefined") globalThis.dedup = dedupApi;

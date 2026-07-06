@@ -18,6 +18,6 @@ function buildCurlCommand(request) {
   return `# cookies are not included; add -b '<cookie>' manually if needed\n${parts.join(" ")}`;
 }
 
-const api = { buildCurlCommand };
-if (typeof module !== "undefined" && module.exports) module.exports = api;
-if (typeof globalThis !== "undefined") globalThis.curlBuilder = api;
+const curlApi = { buildCurlCommand };
+if (typeof module !== "undefined" && module.exports) module.exports = curlApi;
+if (typeof globalThis !== "undefined") globalThis.curlBuilder = curlApi;

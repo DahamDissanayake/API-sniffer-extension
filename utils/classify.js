@@ -37,6 +37,6 @@ function hasAuthWarning(headers) {
   });
 }
 
-const api = { isStaticAsset, classifyContentType, hasAuthWarning };
-if (typeof module !== "undefined" && module.exports) module.exports = api;
-if (typeof globalThis !== "undefined") globalThis.classify = api;
+const classifyApi = { isStaticAsset, classifyContentType, hasAuthWarning };
+if (typeof module !== "undefined" && module.exports) module.exports = classifyApi;
+if (typeof globalThis !== "undefined") globalThis.classify = classifyApi;
