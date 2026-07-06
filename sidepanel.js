@@ -25,14 +25,21 @@ async function loadEndpoints() {
   renderEndpointList();
 }
 
+// Cards are updated in place rather than being torn down and rebuilt on every
+// render. A busy site can produce a storage change (and thus a re-render) every
+// few hundred milliseconds; rebuilding the DOM each time would reset scroll
+// position and collapse any card the user just expanded to read, making it
+// impossible to actually inspect a fast-moving endpoint. Reusing existing card
+// elements keeps `details.hidden` (expanded/collapsed) and any open replay form
+// untouched across updates, and only refreshes the text that can change.
 function renderEndpointList() {
   const container = qs("endpoint-list");
-  container.innerHTML = "";
   const entries = Object.entries(state.endpoints)
     .filter(([, entry]) => entry.pattern.toLowerCase().includes(state.filter.toLowerCase()))
     .sort((a, b) => b[1].lastSeen - a[1].lastSeen);
 
   if (entries.length === 0) {
+    container.innerHTML = "";
     const empty = document.createElement("p");
     empty.className = "empty-state";
     empty.textContent = "No endpoints captured yet for this origin.";
@@ -40,8 +47,30 @@ function renderEndpointList() {
     return;
   }
 
+  if (container.querySelector(".empty-state")) {
+    container.innerHTML = "";
+  }
+
+  const existingCards = new Map();
+  for (const child of Array.from(container.children)) {
+    if (child.dataset.key) existingCards.set(child.dataset.key, child);
+  }
+
   for (const [key, entry] of entries) {
-    container.appendChild(renderCard(key, entry));
+    let card = existingCards.get(key);
+    if (card) {
+      existingCards.delete(key);
+      updateCard(card, entry);
+    } else {
+      card = renderCard(key, entry);
+    }
+    // appendChild on a node that's already a child of `container` just moves
+    // it to the end (re-sorting), it does not recreate or reset the node.
+    container.appendChild(card);
+  }
+
+  for (const stale of existingCards.values()) {
+    stale.remove();
   }
 }
 
@@ -52,6 +81,8 @@ function cssSafe(key) {
 function renderCard(key, entry) {
   const card = document.createElement("div");
   card.className = "endpoint-card";
+  card.dataset.key = key;
+  card._entry = entry;
 
   const summary = document.createElement("div");
   summary.className = "endpoint-summary";
@@ -66,7 +97,6 @@ function renderCard(key, entry) {
 
   const meta = document.createElement("span");
   meta.className = "endpoint-meta";
-  meta.textContent = `${entry.hitCount} hits · ${entry.tag}${entry.authWarning ? " · auth-warning" : ""}`;
 
   summary.appendChild(methodBadge);
   summary.appendChild(pathLabel);
@@ -79,27 +109,28 @@ function renderCard(key, entry) {
     details.hidden = !details.hidden;
   });
 
-  const latestSample = entry.samples[0];
-  details.appendChild(renderSection("Headers", JSON.stringify(latestSample.requestHeaders, null, 2)));
-  details.appendChild(renderSection("Request Body", latestSample.requestBody || "(empty)"));
-  const responseNote = latestSample.responseTruncated ? "\n[response was truncated]" : "";
-  details.appendChild(
-    renderSection("Response Body", (latestSample.responseBody || "(empty)") + responseNote)
-  );
+  const headersSection = renderSection("Headers", "");
+  const requestBodySection = renderSection("Request Body", "");
+  const responseBodySection = renderSection("Response Body", "");
+  details.appendChild(headersSection);
+  details.appendChild(requestBodySection);
+  details.appendChild(responseBodySection);
 
   const actions = document.createElement("div");
   actions.className = "endpoint-actions";
 
   const replayButton = document.createElement("button");
   replayButton.textContent = "Replay";
-  replayButton.addEventListener("click", () => openReplayForm(key, entry));
+  replayButton.addEventListener("click", () => openReplayForm(key, card._entry));
 
   const curlButton = document.createElement("button");
   curlButton.textContent = "Copy as curl";
   curlButton.addEventListener("click", () => {
+    const currentEntry = card._entry;
+    const latestSample = currentEntry.samples[0];
     const cmd = curlBuilder.buildCurlCommand({
-      method: entry.method,
-      url: latestSample.url.startsWith("http") ? latestSample.url : entry.origin + latestSample.url,
+      method: currentEntry.method,
+      url: latestSample.url.startsWith("http") ? latestSample.url : currentEntry.origin + latestSample.url,
       headers: latestSample.requestHeaders,
       body: latestSample.requestBody,
     });
@@ -117,7 +148,23 @@ function renderCard(key, entry) {
 
   card.appendChild(summary);
   card.appendChild(details);
+
+  card._refs = { meta, headersSection, requestBodySection, responseBodySection };
+  updateCard(card, entry);
   return card;
+}
+
+function updateCard(card, entry) {
+  card._entry = entry;
+  const { meta, headersSection, requestBodySection, responseBodySection } = card._refs;
+
+  meta.textContent = `${entry.hitCount} hits · ${entry.tag}${entry.authWarning ? " · auth-warning" : ""}`;
+
+  const latestSample = entry.samples[0];
+  headersSection.querySelector("pre").textContent = JSON.stringify(latestSample.requestHeaders, null, 2);
+  requestBodySection.querySelector("pre").textContent = latestSample.requestBody || "(empty)";
+  const responseNote = latestSample.responseTruncated ? "\n[response was truncated]" : "";
+  responseBodySection.querySelector("pre").textContent = (latestSample.responseBody || "(empty)") + responseNote;
 }
 
 function renderSection(label, content) {
@@ -281,10 +328,18 @@ async function init() {
   // Keep the list "live" while the panel stays open on the same tab: background.js
   // writes captures to chrome.storage.local as they happen, so react to changes on
   // the current origin's key instead of only refreshing on tab switch/navigation.
+  // Debounced because a busy site can fire storage changes many times a second;
+  // reloading on every single one would re-sort the list out from under the user
+  // repeatedly instead of once they've paused.
+  let reloadTimer = null;
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local" || !state.origin) return;
     if (Object.prototype.hasOwnProperty.call(changes, `endpoints::${state.origin}`)) {
-      loadEndpoints();
+      if (reloadTimer) return;
+      reloadTimer = setTimeout(() => {
+        reloadTimer = null;
+        loadEndpoints();
+      }, 400);
     }
   });
 }
