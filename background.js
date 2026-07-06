@@ -9,6 +9,21 @@ importScripts(
 const recentHookCaptures = new Map();
 const pendingRequestData = new Map(); // requestId -> { method, url, headers, body }
 
+// ingestCapture does an async read-modify-write against chrome.storage.local
+// (getSettings -> getOriginData -> mergeCapture -> setOriginData). Two captures
+// arriving close together (e.g. several XHRs firing in the same tick, or the
+// webRequest fallback and the hook both landing near-simultaneously) would
+// otherwise both read the same pre-merge state and the second write clobbers the
+// first, silently dropping a capture. Funnel every call through this promise
+// chain so writes for the same service worker instance are always serialized.
+let ingestQueue = Promise.resolve();
+function queueIngestCapture(payload) {
+  ingestQueue = ingestQueue
+    .then(() => ingestCapture(payload))
+    .catch((e) => console.error("api-sniffer capture error", e));
+  return ingestQueue;
+}
+
 function cleanupRecentHookCaptures() {
   const cutoff = Date.now() - 5000;
   for (const [key, ts] of recentHookCaptures) {
@@ -158,7 +173,7 @@ chrome.webRequest.onCompleted.addListener(
       // platform limitation, not something extra permissions unlock), so this fallback
       // path only ever fills in requests the MAIN-world hook missed entirely, with
       // responseBody left undefined. See README.md "Chrome API limitations".
-      ingestCapture({
+      queueIngestCapture({
         method: pending.method,
         url: pending.url,
         requestHeaders: pending.headers,
@@ -167,7 +182,7 @@ chrome.webRequest.onCompleted.addListener(
         responseBody: undefined,
         status: details.statusCode,
         timestamp: Date.now(),
-      }).catch((e) => console.error("api-sniffer webRequest capture error", e));
+      });
     }, 500);
   },
   { urls: ["<all_urls>"] },
@@ -180,7 +195,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "capture") {
     const key = `${message.payload.method} ${message.payload.url}`;
     recentHookCaptures.set(key, Date.now());
-    ingestCapture(message.payload).catch((e) => console.error("api-sniffer capture error", e));
+    queueIngestCapture(message.payload);
     return false;
   }
 
