@@ -1005,7 +1005,7 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
   window.fetch = async function patchedFetch(input, init) {
     const startTime = Date.now();
     const method = (init && init.method) || (typeof input !== "string" && input && input.method) || "GET";
-    const url = typeof input === "string" ? input : input.url;
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 
     const requestHeaders = {};
     if (init && init.headers) {
@@ -1017,34 +1017,40 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
 
     const response = await originalFetch.call(this, input, init);
 
+    // Read headers synchronously and the body asynchronously, without awaiting the
+    // body before returning `response` to the page. Native fetch() resolves as soon
+    // as headers arrive, independent of body consumption — awaiting cloned.text()
+    // here would hang the page's own fetch() promise forever on a long-lived/streamed
+    // response (SSE-over-fetch, chunked NDJSON, etc), which breaks "passive" capture.
     const cloned = response.clone();
-    let responseBody;
-    try {
-      responseBody = await cloned.text();
-    } catch (e) {
-      responseBody = undefined;
-    }
     const responseHeaders = {};
     cloned.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    window.postMessage(
-      {
-        source: "api-sniffer-hook",
-        payload: {
-          method: method.toUpperCase(),
-          url,
-          requestHeaders,
-          requestBody,
-          responseHeaders,
-          responseBody,
-          status: response.status,
-          timestamp: startTime,
-        },
-      },
-      "*"
-    );
+    cloned
+      .text()
+      .then((responseBody) => {
+        window.postMessage(
+          {
+            source: "api-sniffer-hook",
+            payload: {
+              method: method.toUpperCase(),
+              url,
+              requestHeaders,
+              requestBody,
+              responseHeaders,
+              responseBody,
+              status: response.status,
+              timestamp: startTime,
+            },
+          },
+          "*"
+        );
+      })
+      .catch(() => {
+        // Body unreadable or never completes (e.g. an infinite stream) — nothing to capture.
+      });
 
     return response;
   };
@@ -1073,6 +1079,17 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
       this.__apiSniffer.requestBody = typeof body === "string" ? body : undefined;
       this.addEventListener("loadend", () => {
         const responseHeaders = headerUtils.parseRawHeaderString(this.getAllResponseHeaders());
+        // Reading .responseText throws InvalidStateError when responseType is anything
+        // other than "" or "text" (a common case: responseType = "json"). Branch on
+        // responseType instead of relying on a typeof check after the throw already happened.
+        let responseBody;
+        if (this.responseType === "" || this.responseType === "text") {
+          responseBody = typeof this.responseText === "string" ? this.responseText : undefined;
+        } else if (this.responseType === "json") {
+          responseBody = this.response !== null && this.response !== undefined ? JSON.stringify(this.response) : undefined;
+        } else {
+          responseBody = undefined; // arraybuffer/blob/document: not safely capturable as text
+        }
         window.postMessage(
           {
             source: "api-sniffer-hook",
@@ -1082,7 +1099,7 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
               requestHeaders: this.__apiSniffer.requestHeaders,
               requestBody: this.__apiSniffer.requestBody,
               responseHeaders,
-              responseBody: typeof this.responseText === "string" ? this.responseText : undefined,
+              responseBody,
               status: this.status,
               timestamp: this.__apiSniffer.startTime,
             },
@@ -1099,6 +1116,11 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
 - [ ] **Step 2: Implement `content-script-bridge.js`**
 
 ```js
+// Trust note: this only filters on message shape (same-window + a matching `source`
+// tag), not authenticity. Because content-script-hook.js runs in the page's own MAIN
+// world (not a privileged context), any script on the page could post a
+// same-shaped message and have it relayed indistinguishably from a genuine capture.
+// Accepted for a personal, local-only tool — see README's "Chrome API limitations".
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   if (!event.data || event.data.source !== "api-sniffer-hook") return;
@@ -2171,6 +2193,12 @@ the response panel.
   **`chrome.sidePanel` requires Chrome 114+**. Older Chrome versions are not supported.
 - **Cookies can't be forwarded to an extension-context `fetch` call directly** — see
   "Replaying with cookies" above for the same-origin injection workaround this extension uses.
+- **The MAIN-world hook cannot cryptographically distinguish its own captures from a
+  spoofed message** — since `content-script-hook.js` runs in the page's own JS realm
+  (not a privileged context), any other script on the page could post a same-shaped
+  `window.postMessage` and have it relayed into storage indistinguishably from a real
+  capture. Accepted as a reasonable tradeoff for a personal, local-only tool rather than
+  adding a shared-secret handshake.
 
 ## Known limitations (by design, not bugs)
 
