@@ -183,5 +183,105 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     ingestCapture(message.payload).catch((e) => console.error("api-sniffer capture error", e));
     return false;
   }
+
+  if (message.type === "getEndpoints") {
+    storage.getOriginData(message.origin).then((data) => sendResponse({ ok: true, data }));
+    return true;
+  }
+
+  if (message.type === "getSettings") {
+    storage.getSettings().then((settings) => sendResponse({ ok: true, settings }));
+    return true;
+  }
+
+  if (message.type === "setSettings") {
+    storage.setSettings(message.settings).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (message.type === "clearDomain") {
+    storage.clearDomain(message.origin).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (message.type === "clearAll") {
+    storage.clearAllData().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (message.type === "replay") {
+    handleReplay(message.origin, message.request).then((result) => sendResponse(result));
+    return true;
+  }
+
+  if (message.type === "replayCookieless") {
+    replayWithoutCookies(message.request).then((result) => sendResponse(result));
+    return true;
+  }
+
   return false;
+});
+
+async function handleReplay(origin, request) {
+  const tabs = await chrome.tabs.query({ url: `${origin}/*` });
+  if (tabs.length === 0) {
+    return { ok: false, reason: "no-tab" };
+  }
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tabs[0].id },
+      world: "MAIN",
+      func: async (req) => {
+        try {
+          const resp = await fetch(req.url, {
+            method: req.method,
+            headers: req.headers,
+            body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
+          });
+          const text = await resp.text();
+          const headers = {};
+          resp.headers.forEach((v, k) => {
+            headers[k] = v;
+          });
+          return { ok: true, status: resp.status, headers, body: text };
+        } catch (err) {
+          return { ok: false, reason: "fetch-error", message: String(err) };
+        }
+      },
+      args: [request],
+    });
+    return result;
+  } catch (err) {
+    return { ok: false, reason: "inject-error", message: String(err) };
+  }
+}
+
+async function replayWithoutCookies(request) {
+  try {
+    const resp = await fetch(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+    });
+    const text = await resp.text();
+    const headers = {};
+    resp.headers.forEach((v, k) => {
+      headers[k] = v;
+    });
+    return { ok: true, status: resp.status, headers, body: text, cookieless: true };
+  } catch (err) {
+    return { ok: false, reason: "fetch-error", message: String(err) };
+  }
+}
+
+chrome.alarms.create("api-sniffer-prune", { periodInMinutes: 1440 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "api-sniffer-prune") {
+    storage.pruneAllOrigins().catch((e) => console.error("api-sniffer prune error", e));
+  }
+});
+storage.pruneAllOrigins().catch((e) => console.error("api-sniffer initial prune error", e));
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 });
