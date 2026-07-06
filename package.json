@@ -4,6 +4,6 @@
   "private": true,
   "description": "Chrome extension that captures and replays API calls per site.",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test \"test/**/*.test.js\""
   }
 }
