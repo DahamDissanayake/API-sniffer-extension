@@ -1,0 +1,138 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #ffffff;
+  color: #1a1a1a;
+  font-size: 13px;
+}
+
+header nav {
+  display: flex;
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.tab-button {
+  flex: 1;
+  padding: 10px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 13px;
+  color: #555;
+  border-bottom: 2px solid transparent;
+}
+
+.tab-button.active {
+  color: #1a1a1a;
+  border-bottom-color: #1a1a1a;
+}
+
+#search-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-bottom: 1px solid #e5e5e5;
+  font-size: 13px;
+  outline: none;
+}
+
+.empty-state {
+  padding: 16px;
+  color: #888;
+}
+
+.endpoint-card {
+  border-bottom: 1px solid #e5e5e5;
+}
+
+.endpoint-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.method-badge {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid #e5e5e5;
+  border-radius: 3px;
+  color: #444;
+}
+
+.endpoint-path {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.endpoint-meta {
+  color: #888;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.endpoint-details {
+  padding: 8px 10px;
+  background: #fafafa;
+  border-top: 1px solid #e5e5e5;
+}
+
+.endpoint-section h4 {
+  margin: 8px 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  color: #888;
+  font-weight: normal;
+}
+
+.endpoint-section pre {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #ffffff;
+  border: 1px solid #e5e5e5;
+  border-radius: 3px;
+  padding: 6px;
+  margin: 0;
+}
+
+.endpoint-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 10px;
+  border: 1px solid #d0d0d0;
+  background: #ffffff;
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #f2f2f2;
+}
+
+#view-settings label {
+  display: block;
+  margin: 10px;
+  font-size: 12px;
+}
+
+#view-settings input {
+  margin-left: 6px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+}

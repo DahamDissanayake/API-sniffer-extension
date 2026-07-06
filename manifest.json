@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "API Sniffer",
+  "version": "0.1.0",
+  "description": "Passively captures fetch/XHR API calls per site and lets you inspect and replay them.",
+  "permissions": ["storage", "webRequest", "activeTab", "scripting", "sidePanel", "tabs", "alarms", "unlimitedStorage"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": {},
+  "side_panel": { "default_path": "sidepanel.html" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["utils/headers.js", "content-script-hook.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script-bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

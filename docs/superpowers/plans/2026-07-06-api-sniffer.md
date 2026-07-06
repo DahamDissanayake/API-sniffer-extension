@@ -368,7 +368,10 @@ test("includes headers except cookie", () => {
     headers: { Accept: "application/json", Cookie: "session=abc", cookie: "session=abc" },
   });
   assert.match(cmd, /-H 'Accept: application\/json'/);
-  assert.doesNotMatch(cmd, /Cookie/i);
+  // Not asserting the whole output lacks the word "cookie" — the builder's own
+  // disclaimer comment legitimately contains it. This checks specifically that
+  // no -H flag carries a Cookie header.
+  assert.doesNotMatch(cmd, /-H '[Cc]ookie:/);
 });
 
 test("includes body with -d for non-GET requests", () => {
@@ -1002,7 +1005,13 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
   window.fetch = async function patchedFetch(input, init) {
     const startTime = Date.now();
     const method = (init && init.method) || (typeof input !== "string" && input && input.method) || "GET";
-    const url = typeof input === "string" ? input : input.url;
+    // Resolve against the page's own location: a plain string `input` is very often
+    // relative (fetch('/api/foo')), and capturing it as-is would let background.js
+    // resolve it against the extension's own origin instead of the page's — silently
+    // misattributing the endpoint to the wrong domain. Request/URL objects already
+    // carry an absolute URL, so this is a no-op for them.
+    const rawUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const url = new URL(rawUrl, location.href).href;
 
     const requestHeaders = {};
     if (init && init.headers) {
@@ -1014,34 +1023,40 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
 
     const response = await originalFetch.call(this, input, init);
 
+    // Read headers synchronously and the body asynchronously, without awaiting the
+    // body before returning `response` to the page. Native fetch() resolves as soon
+    // as headers arrive, independent of body consumption — awaiting cloned.text()
+    // here would hang the page's own fetch() promise forever on a long-lived/streamed
+    // response (SSE-over-fetch, chunked NDJSON, etc), which breaks "passive" capture.
     const cloned = response.clone();
-    let responseBody;
-    try {
-      responseBody = await cloned.text();
-    } catch (e) {
-      responseBody = undefined;
-    }
     const responseHeaders = {};
     cloned.headers.forEach((value, key) => {
       responseHeaders[key] = value;
     });
 
-    window.postMessage(
-      {
-        source: "api-sniffer-hook",
-        payload: {
-          method: method.toUpperCase(),
-          url,
-          requestHeaders,
-          requestBody,
-          responseHeaders,
-          responseBody,
-          status: response.status,
-          timestamp: startTime,
-        },
-      },
-      "*"
-    );
+    cloned
+      .text()
+      .then((responseBody) => {
+        window.postMessage(
+          {
+            source: "api-sniffer-hook",
+            payload: {
+              method: method.toUpperCase(),
+              url,
+              requestHeaders,
+              requestBody,
+              responseHeaders,
+              responseBody,
+              status: response.status,
+              timestamp: startTime,
+            },
+          },
+          "*"
+        );
+      })
+      .catch(() => {
+        // Body unreadable or never completes (e.g. an infinite stream) — nothing to capture.
+      });
 
     return response;
   };
@@ -1054,7 +1069,10 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
   const originalSetRequestHeader = XHRProto.setRequestHeader;
 
   XHRProto.open = function patchedOpen(method, url, ...rest) {
-    this.__apiSniffer = { method: method.toUpperCase(), url, requestHeaders: {}, startTime: Date.now() };
+    // Same relative-URL concern as the fetch hook above: xhr.open('GET', '/api/foo')
+    // is common and must resolve against the page's own location, not the extension's.
+    const absoluteUrl = new URL(url, location.href).href;
+    this.__apiSniffer = { method: method.toUpperCase(), url: absoluteUrl, requestHeaders: {}, startTime: Date.now() };
     return originalOpen.call(this, method, url, ...rest);
   };
 
@@ -1070,6 +1088,17 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
       this.__apiSniffer.requestBody = typeof body === "string" ? body : undefined;
       this.addEventListener("loadend", () => {
         const responseHeaders = headerUtils.parseRawHeaderString(this.getAllResponseHeaders());
+        // Reading .responseText throws InvalidStateError when responseType is anything
+        // other than "" or "text" (a common case: responseType = "json"). Branch on
+        // responseType instead of relying on a typeof check after the throw already happened.
+        let responseBody;
+        if (this.responseType === "" || this.responseType === "text") {
+          responseBody = typeof this.responseText === "string" ? this.responseText : undefined;
+        } else if (this.responseType === "json") {
+          responseBody = this.response !== null && this.response !== undefined ? JSON.stringify(this.response) : undefined;
+        } else {
+          responseBody = undefined; // arraybuffer/blob/document: not safely capturable as text
+        }
         window.postMessage(
           {
             source: "api-sniffer-hook",
@@ -1079,7 +1108,7 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
               requestHeaders: this.__apiSniffer.requestHeaders,
               requestBody: this.__apiSniffer.requestBody,
               responseHeaders,
-              responseBody: typeof this.responseText === "string" ? this.responseText : undefined,
+              responseBody,
               status: this.status,
               timestamp: this.__apiSniffer.startTime,
             },
@@ -1096,6 +1125,11 @@ git commit -m "Add endpoint merge, truncation, and pruning logic"
 - [ ] **Step 2: Implement `content-script-bridge.js`**
 
 ```js
+// Trust note: this only filters on message shape (same-window + a matching `source`
+// tag), not authenticity. Because content-script-hook.js runs in the page's own MAIN
+// world (not a privileged context), any script on the page could post a
+// same-shaped message and have it relayed indistinguishably from a genuine capture.
+// Accepted for a personal, local-only tool — see README's "Chrome API limitations".
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   if (!event.data || event.data.source !== "api-sniffer-hook") return;
@@ -1145,6 +1179,21 @@ importScripts(
 
 const recentHookCaptures = new Map();
 const pendingRequestData = new Map(); // requestId -> { method, url, headers, body }
+
+// ingestCapture does an async read-modify-write against chrome.storage.local
+// (getSettings -> getOriginData -> mergeCapture -> setOriginData). Two captures
+// arriving close together (e.g. several XHRs firing in the same tick, or the
+// webRequest fallback and the hook both landing near-simultaneously) would
+// otherwise both read the same pre-merge state and the second write clobbers the
+// first, silently dropping a capture. Funnel every call through this promise
+// chain so writes for the same service worker instance are always serialized.
+let ingestQueue = Promise.resolve();
+function queueIngestCapture(payload) {
+  ingestQueue = ingestQueue
+    .then(() => ingestCapture(payload))
+    .catch((e) => console.error("api-sniffer capture error", e));
+  return ingestQueue;
+}
 
 function cleanupRecentHookCaptures() {
   const cutoff = Date.now() - 5000;
@@ -1250,7 +1299,21 @@ chrome.webRequest.onSendHeaders.addListener(
     pending.headers = headers;
   },
   { urls: ["<all_urls>"] },
-  ["requestHeaders"]
+  // "extraHeaders" is required to see security-sensitive request headers (notably
+  // Authorization) in this callback at all — without it Chrome silently omits them,
+  // which would under-detect authWarning for requests the hook missed and this
+  // fallback path had to capture on its own.
+  ["requestHeaders", "extraHeaders"]
+);
+
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    // Aborted/failed requests never reach onCompleted, so without this listener
+    // their pendingRequestData entry (set in onBeforeRequest) would never be
+    // cleaned up and would accumulate for the life of the service worker instance.
+    pendingRequestData.delete(details.requestId);
+  },
+  { urls: ["<all_urls>"] }
 );
 
 chrome.webRequest.onCompleted.addListener(
@@ -1259,40 +1322,51 @@ chrome.webRequest.onCompleted.addListener(
     pendingRequestData.delete(details.requestId);
     if (!pending) return;
 
-    cleanupRecentHookCaptures();
-    if (dedup.shouldSkipWebRequestFallback(recentHookCaptures, pending.method, pending.url, Date.now())) {
-      return;
-    }
-
     const responseHeaders = {};
     (details.responseHeaders || []).forEach((h) => {
       responseHeaders[h.name] = h.value;
     });
 
-    // Note: chrome.webRequest cannot access response bodies at all (a hard Chrome
-    // platform limitation, not something extra permissions unlock), so this fallback
-    // path only ever fills in requests the MAIN-world hook missed entirely, with
-    // responseBody left undefined. See README.md "Chrome API limitations".
-    ingestCapture({
-      method: pending.method,
-      url: pending.url,
-      requestHeaders: pending.headers,
-      requestBody: pending.body,
-      responseHeaders,
-      responseBody: undefined,
-      status: details.statusCode,
-      timestamp: Date.now(),
-    }).catch((e) => console.error("api-sniffer webRequest capture error", e));
+    // webRequest.onCompleted fires as soon as the network layer finishes, which is
+    // typically BEFORE the MAIN-world hook's capture message arrives here — that
+    // message has to cross an extra postMessage + chrome.runtime.sendMessage hop.
+    // Checking the dedup window immediately would almost always miss a hook capture
+    // that's still in flight, double-counting nearly every request. Delay briefly
+    // and re-check right before ingesting instead, giving the hook message time to
+    // register in recentHookCaptures first.
+    setTimeout(() => {
+      cleanupRecentHookCaptures();
+      if (dedup.shouldSkipWebRequestFallback(recentHookCaptures, pending.method, pending.url, Date.now())) {
+        return;
+      }
+
+      // Note: chrome.webRequest cannot access response bodies at all (a hard Chrome
+      // platform limitation, not something extra permissions unlock), so this fallback
+      // path only ever fills in requests the MAIN-world hook missed entirely, with
+      // responseBody left undefined. See README.md "Chrome API limitations".
+      queueIngestCapture({
+        method: pending.method,
+        url: pending.url,
+        requestHeaders: pending.headers,
+        requestBody: pending.body,
+        responseHeaders,
+        responseBody: undefined,
+        status: details.statusCode,
+        timestamp: Date.now(),
+      });
+    }, 500);
   },
   { urls: ["<all_urls>"] },
-  ["responseHeaders"]
+  // "extraHeaders" is required to see Set-Cookie and a few other security-sensitive
+  // response headers in this callback — same rationale as onSendHeaders above.
+  ["responseHeaders", "extraHeaders"]
 );
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "capture") {
     const key = `${message.payload.method} ${message.payload.url}`;
     recentHookCaptures.set(key, Date.now());
-    ingestCapture(message.payload).catch((e) => console.error("api-sniffer capture error", e));
+    queueIngestCapture(message.payload);
     return false;
   }
   return false;
@@ -1337,7 +1411,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "capture") {
     const key = `${message.payload.method} ${message.payload.url}`;
     recentHookCaptures.set(key, Date.now());
-    ingestCapture(message.payload).catch((e) => console.error("api-sniffer capture error", e));
+    queueIngestCapture(message.payload);
     return false;
   }
 
@@ -1659,6 +1733,15 @@ async function init() {
       await loadEndpoints();
     }
   });
+  // Keep the list "live" while the panel stays open on the same tab: background.js
+  // writes captures to chrome.storage.local as they happen, so react to changes on
+  // the current origin's key instead of only refreshing on tab switch/navigation.
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local" || !state.origin) return;
+    if (Object.prototype.hasOwnProperty.call(changes, `endpoints::${state.origin}`)) {
+      loadEndpoints();
+    }
+  });
 }
 
 init();
@@ -1955,18 +2038,21 @@ function openReplayForm(key, entry) {
     const request = { method: entry.method, url: urlInput.value, headers, body: bodyInput.value || undefined };
     responseBox.textContent = "Sending...";
 
+    // If a prior click already found no open tab, skip straight to the cookie-less
+    // fallback instead of re-trying "replay" (which would just fail with "no-tab"
+    // again as long as the tab stays closed, and re-trigger the warning forever).
+    if (sendButton.dataset.forceCookieless === "true") {
+      const fallback = await chrome.runtime.sendMessage({ type: "replayCookieless", request });
+      renderReplayResult(responseBox, fallback);
+      return;
+    }
+
     const result = await chrome.runtime.sendMessage({ type: "replay", origin: entry.origin, request });
 
     if (!result.ok && result.reason === "no-tab") {
       responseBox.textContent =
         "No open tab for this origin. Open the site to replay with its session, or click Send again to replay cookie-less.";
       sendButton.dataset.forceCookieless = "true";
-      return;
-    }
-
-    if (sendButton.dataset.forceCookieless === "true" && !result.ok) {
-      const fallback = await chrome.runtime.sendMessage({ type: "replayCookieless", request });
-      renderReplayResult(responseBox, fallback);
       return;
     }
 
@@ -2061,6 +2147,15 @@ async function init() {
       await loadEndpoints();
     }
   });
+  // Keep the list "live" while the panel stays open on the same tab: background.js
+  // writes captures to chrome.storage.local as they happen, so react to changes on
+  // the current origin's key instead of only refreshing on tab switch/navigation.
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local" || !state.origin) return;
+    if (Object.prototype.hasOwnProperty.call(changes, `endpoints::${state.origin}`)) {
+      loadEndpoints();
+    }
+  });
 }
 ```
 
@@ -2144,8 +2239,9 @@ the response panel.
 - `host_permissions: ["<all_urls>"]` is required so capture works on every site you browse to,
   not just ones you've pre-approved. To restrict this extension to specific sites, replace
   `<all_urls>` in `manifest.json`'s `host_permissions` **and** the `content_scripts.matches`
-  arrays **and** the `urls` filters in `background.js`'s three `chrome.webRequest.*` listeners
-  with explicit origins, e.g. `"https://your-app.example.com/*"`. Note that `<all_urls>`
+  arrays **and** the `urls` filters in `background.js`'s four `chrome.webRequest.*` listeners
+  (`onBeforeRequest`, `onSendHeaders`, `onErrorOccurred`, `onCompleted`) with explicit origins,
+  e.g. `"https://your-app.example.com/*"`. Note that `<all_urls>`
   triggers a broad permissions warning if you ever package and publish this extension — fine
   for personal unpacked use, worth narrowing before sharing.
 - `unlimitedStorage` avoids `chrome.storage.local`'s default ~10MB cap, since captured bodies
@@ -2168,6 +2264,12 @@ the response panel.
   **`chrome.sidePanel` requires Chrome 114+**. Older Chrome versions are not supported.
 - **Cookies can't be forwarded to an extension-context `fetch` call directly** — see
   "Replaying with cookies" above for the same-origin injection workaround this extension uses.
+- **The MAIN-world hook cannot cryptographically distinguish its own captures from a
+  spoofed message** — since `content-script-hook.js` runs in the page's own JS realm
+  (not a privileged context), any other script on the page could post a same-shaped
+  `window.postMessage` and have it relayed into storage indistinguishably from a real
+  capture. Accepted as a reasonable tradeoff for a personal, local-only tool rather than
+  adding a shared-secret handshake.
 
 ## Known limitations (by design, not bugs)
 
