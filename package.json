@@ -1,0 +1,9 @@
+{
+  "name": "api-sniffer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension that captures and replays API calls per site.",
+  "scripts": {
+    "test": "node --test test/"
+  }
+}
