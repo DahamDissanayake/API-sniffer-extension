@@ -368,7 +368,10 @@ test("includes headers except cookie", () => {
     headers: { Accept: "application/json", Cookie: "session=abc", cookie: "session=abc" },
   });
   assert.match(cmd, /-H 'Accept: application\/json'/);
-  assert.doesNotMatch(cmd, /Cookie/i);
+  // Not asserting the whole output lacks the word "cookie" — the builder's own
+  // disclaimer comment legitimately contains it. This checks specifically that
+  // no -H flag carries a Cookie header.
+  assert.doesNotMatch(cmd, /-H '[Cc]ookie:/);
 });
 
 test("includes body with -d for non-GET requests", () => {
