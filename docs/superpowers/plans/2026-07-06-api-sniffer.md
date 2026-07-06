@@ -1718,6 +1718,15 @@ async function init() {
       await loadEndpoints();
     }
   });
+  // Keep the list "live" while the panel stays open on the same tab: background.js
+  // writes captures to chrome.storage.local as they happen, so react to changes on
+  // the current origin's key instead of only refreshing on tab switch/navigation.
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local" || !state.origin) return;
+    if (Object.prototype.hasOwnProperty.call(changes, `endpoints::${state.origin}`)) {
+      loadEndpoints();
+    }
+  });
 }
 
 init();
@@ -2118,6 +2127,15 @@ async function init() {
     if (changeInfo.status === "complete" && tab.active) {
       state.origin = await getActiveTabOrigin();
       await loadEndpoints();
+    }
+  });
+  // Keep the list "live" while the panel stays open on the same tab: background.js
+  // writes captures to chrome.storage.local as they happen, so react to changes on
+  // the current origin's key instead of only refreshing on tab switch/navigation.
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local" || !state.origin) return;
+    if (Object.prototype.hasOwnProperty.call(changes, `endpoints::${state.origin}`)) {
+      loadEndpoints();
     }
   });
 }
