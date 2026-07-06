@@ -2224,8 +2224,9 @@ the response panel.
 - `host_permissions: ["<all_urls>"]` is required so capture works on every site you browse to,
   not just ones you've pre-approved. To restrict this extension to specific sites, replace
   `<all_urls>` in `manifest.json`'s `host_permissions` **and** the `content_scripts.matches`
-  arrays **and** the `urls` filters in `background.js`'s three `chrome.webRequest.*` listeners
-  with explicit origins, e.g. `"https://your-app.example.com/*"`. Note that `<all_urls>`
+  arrays **and** the `urls` filters in `background.js`'s four `chrome.webRequest.*` listeners
+  (`onBeforeRequest`, `onSendHeaders`, `onErrorOccurred`, `onCompleted`) with explicit origins,
+  e.g. `"https://your-app.example.com/*"`. Note that `<all_urls>`
   triggers a broad permissions warning if you ever package and publish this extension — fine
   for personal unpacked use, worth narrowing before sharing.
 - `unlimitedStorage` avoids `chrome.storage.local`'s default ~10MB cap, since captured bodies
